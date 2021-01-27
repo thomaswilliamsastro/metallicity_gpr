@@ -12,7 +12,7 @@ from astropy.io import fits
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.gaussian_process import GaussianProcessRegressor
-from sklearn.gaussian_process.kernels import Matern
+from sklearn.gaussian_process.kernels import Matern, ConstantKernel, WhiteKernel
 import dill
 from astropy.wcs import WCS
 
@@ -20,41 +20,28 @@ from vars import top_dir, muse_dir, muse_version, hii_mask_dir, metallicity_dir,
 
 os.chdir(top_dir)
 
-# x = np.linspace(-10, 10, 100)
-#
-# nus = [0.5, 1.5, 2.5, 20]
-#
-# plt.figure()
-#
-# for nu in nus:
-#
-#     kernel = Matern(length_scale=1, nu=nu)
-#     gp = GaussianProcessRegressor(kernel=kernel)
-#
-#     y_pred = gp.sample_y(x.reshape(-1, 1))
-#
-#     plt.plot(x,y_pred, label='nu=' + str(nu))
-#
-# plt.legend(loc='upper right')
-# plt.show()
-# no
+x = np.linspace(-10, 10, 250)
+x = x.reshape(-1, 1)
 
-hii_table = Table.read(hii_mask_dir + 'Nebulae_Catalogue.fits')
+kernel = Matern(length_scale=3, length_scale_bounds=(0.1, 10), nu=1.5) #+ ConstantKernel(0) + WhiteKernel(0.1, noise_level_bounds=(1e-9, 10))
+gp = GaussianProcessRegressor(kernel=kernel, n_restarts_optimizer=25)
 
-galaxy = 'NGC628'
+y = gp.sample_y(x) #+ np.random.normal(scale=0.1, size=x.shape)
 
-hii_rows = hii_table[hii_table['gal_name'] == galaxy]
-hii_rows = hii_rows[~np.isnan(hii_rows['met_scal'])]
-hii_ids = list(hii_rows['region_ID'])
+# Fit this
 
-hii_hdu = fits.open(hii_mask_dir + 'spatial_masks/' + galaxy + '_HIIreg_mask.fits')[0]
+gp.fit(x, y)
+y_pred = gp.sample_y(x).flatten()
+print(gp.kernel_)
 
-data = hii_hdu.data.flatten()
+# https://arxiv.org/pdf/1408.5810.pdf, p4
+det_cov = np.linalg.det(gp.kernel_(gp.X_train_))
 
-total_n_pix = len(np.where(~np.isnan(data))[0])
+log_likelihood = gp.log_marginal_likelihood()
+print(log_likelihood)
+no
 
-hii_region_pix = 0
-for hii_id in hii_ids:
-    hii_region_pix += len(np.where(data == hii_id)[0])
-
-print(hii_region_pix / total_n_pix)
+plt.figure()
+plt.plot(x, y, 'rx')
+plt.plot(x, y_pred, 'bo')
+plt.show()
