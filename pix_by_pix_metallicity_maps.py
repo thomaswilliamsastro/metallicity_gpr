@@ -16,13 +16,14 @@ import numpy as np
 from uncertainties import ufloat
 from uncertainties import unumpy as unp
 
-from vars import top_dir, muse_dir, muse_version, galaxies, metallicity_dir, metallicity_calib
+from vars import top_dir, muse_dir, muse_version, galaxies, metallicity_dir, metallicity_calib, all_lines, strong_lines, \
+    use_conv
 
 warnings.simplefilter('ignore')
 
 os.chdir(top_dir)
 
-overwrite = False
+overwrite = True
 
 hdu_out_dir = os.path.join(metallicity_dir, 'pix_maps', muse_version)
 if not os.path.exists(hdu_out_dir):
@@ -37,14 +38,11 @@ k_lambda = {'HB4861': 5.252,
             'SII6716': 2.644,
             'SII6730': 2.637}
 
-all_lines = ['HA6562', 'HB4861', 'OIII5006', 'OIII4958', 'NII6583', 'NII6548', 'OIII5006', 'OIII4958',
-             'SII6716', 'SII6730']
-strong_lines = ['HB4861', 'OIII5006', 'HA6562', 'NII6583', 'SII6716', 'SII6730']
-
 s_n_ratio = 5  # 3
 vel_cutoff = 100
 
 galaxies = ['IC5332']
+flux_to_use = 'HA6562_FLUX'
 
 for galaxy in galaxies:
 
@@ -58,7 +56,10 @@ for galaxy in galaxies:
 
         maps = {}
 
-        muse_hdu_file_name = os.path.join(muse_dir, muse_version, galaxy + '_MAPS.fits')
+        muse_hdu_file_name = os.path.join(muse_dir, muse_version)
+        if use_conv:
+            muse_hdu_file_name += '/conv/'
+        muse_hdu_file_name += galaxy + '_MAPS.fits'
         muse_hdu = fits.open(muse_hdu_file_name)
 
         # for hdu in muse_hdu[1:]:
@@ -67,16 +68,12 @@ for galaxy in galaxies:
 
         # We begin the mask. First up, any NaNs in the original image. 1 for pixels we include, 0 for ones we exclude
 
-        mask = np.zeros_like(muse_hdu[1].data)
-        mask[np.isnan(muse_hdu[1].data)] = 1
+        mask = np.zeros_like(muse_hdu[flux_to_use].data)
+        mask[np.isnan(muse_hdu[flux_to_use].data)] = 1
 
         # Start by calculating an extinction correction. We first want an E(B-V) to correct for Galactic extinction
 
-        galaxy_edit = galaxy
-        if galaxy == 'NGC628':
-            galaxy_edit = 'NGC0628'
-
-        query = IrsaDust.get_query_table(galaxy_edit, section='ebv')
+        query = IrsaDust.get_query_table(galaxy, section='ebv')
         ebv = ufloat(float(query['ext SandF mean']), float(query['ext SandF std']))
 
         for line in all_lines:
@@ -207,7 +204,7 @@ for galaxy in galaxies:
 
         print('%.1f: Metallicity map calculated' % (time.time() - start))
 
-        header = muse_hdu['HB4861_FLUX'].header
+        header = muse_hdu[flux_to_use].header
         fits.writeto(hdu_out_name, metallicity, header, overwrite=True)
         fits.writeto(hdu_out_name.replace('.fits', '_err.fits'), metallicity_err, header, overwrite=True)
 

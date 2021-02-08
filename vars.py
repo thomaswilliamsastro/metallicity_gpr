@@ -22,8 +22,9 @@ plot_dir = os.path.join('plots', 'metallicity_gpr')
 nebulae_ver = 'v1'
 hii_mask_dir = os.path.join('nebulae_catalogue/', nebulae_ver)
 
-muse_version = 'DR1.0'
-phangs_version = 'v1p5'
+muse_version = 'DR2.0'
+phangs_version = 'v1p6'
+use_conv = True
 gpr_version = 'v0p2'
 
 phangs_table_name = os.path.join(top_dir, 'documents', 'phangs_sample_table_' + phangs_version + '.fits')
@@ -44,6 +45,11 @@ galaxies = sorted(galaxies)
 # Calibrations available are pg16_scal, d16
 
 metallicity_calib = 'pg16_scal'
+
+# Lines we need
+all_lines = ['HA6562', 'HB4861', 'OIII5006', 'OIII4958', 'NII6583', 'NII6548', 'OIII5006', 'OIII4958',
+             'SII6716', 'SII6730']
+strong_lines = ['HB4861', 'OIII5006', 'HA6562', 'NII6583', 'SII6716', 'SII6730']
 
 # Various settings for type of GPR
 

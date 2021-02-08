@@ -28,5 +28,9 @@ def add_master_table_info(master_table, galaxy_dict, galaxy, cols_to_include, or
 
 def get_info_from_master_table(table, galaxy, params):
     row = table[table['name'] == galaxy]
+    info = [row[param][0] for param in params]
 
-    return [row[param][0] for param in params]
+    if len(info) == 1:
+        info = info[0]
+
+    return info
