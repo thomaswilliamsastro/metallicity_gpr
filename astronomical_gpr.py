@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
+import multiprocessing as mp
 import os
 import time
 import warnings
+from multiprocessing import Pool
 
 import corner
 import dill
@@ -22,6 +24,7 @@ matplotlib.rcParams['font.family'] = 'STIXGeneral'
 matplotlib.rcParams['font.size'] = 14
 
 PIXEL_SCALE_NAMES = ['XPIXSIZE', 'CDELT1', 'CD1_1']
+N_THREADS = min([8, mp.cpu_count()])
 
 
 def ln_prior(theta):
@@ -45,6 +48,7 @@ def ln_like(theta, x, y, y_err):
     m, c, scatter = theta
     model = m * x + c
     total_err2 = y_err ** 2 + scatter ** 2
+
     return -0.5 * np.sum((y - model) ** 2 / total_err2 + np.log(2 * np.pi * total_err2))
 
 
@@ -146,7 +150,7 @@ class AstronomicalGPR:
         data_hdu (astropy.fits.PrimaryHDU): HDU that defines the pixel grid that we will eventually interpolate the GPR
             onto.
         nan_mask (numpy.ndarray): Mask defining NaNs in `data_hdu`.
-        pix_size (float): pixel size for `data_hdu`, (arcsec).
+        pix_size (float): pixel size for `data_hdu` (arcsec).
         wcs: WCS for `data_hdu`.
 
         Galaxy properties:
@@ -159,7 +163,7 @@ class AstronomicalGPR:
         r25 (float, optional): If provided, will produce plots and do fits in terms of r25. Defaults to None, at which
             point fits will instead be done in terms of kpc. This can be useful to normalise multiple galaxies (arcsec).
 
-        Fitting properties:
+        Radial fitting properties:
 
         n_dim (int): Dimensionality for radial fitting.
         n_walkers (int): Number of MCMC walkers.
@@ -169,33 +173,38 @@ class AstronomicalGPR:
         r_0 (float): Central amplitude of radial fit.
         m_err (float): Gradient error.
         r_0_err (float): Central amplitude error.
+        intrinsic_scatter (float): Modelled intrinsic scatter of the data.
+        radial_goodness_of_fit (float): R^2 value for the radial fit.
 
-        GPR properties:
+        HDU properties:
 
         x_full (np.ndarray): Array of physical x positions in `data_hdu`.
         y_full (np.ndarray): Array of physical y-positions in `data_hdu`.
-        xy_full (np.ndarray): Concatenated, flatten, NaN removed `x_full` and `y_full` for scikit-learn.
-        TODO FROM HERE
-        self.r_full = None
+        xy_full (np.ndarray): Concatenated, flattened, NaN removed `x_full` and `y_full` for scikit-learn.
+        r_full (np.ndarray): Radial distance array for every pixel in `data_hdu`.
 
-        self.region_numbers = None
-        self.x_region_pix = None
-        self.y_region_pix = None
-        self.parameter = None
-        self.parameter_radial_subtract = None
-        self.parameter_err = None
+        Parameter properties:
 
-        self.xy_regions = None
-        self.r_regions = None
+        region_numbers (np.ndarray): If using regions, these will be mapped to a spatial mask via these numbers.
+        x_region_pix (np.ndarray): Array of physical x-positions for each position.
+        y_region_pix (np.ndarray): Array of physical y-positions for each position.
+        parameter (np.ndarray): Array of parameter values for each position.
+        parameter_radial_subtract (np.ndarray): If subtracting a radial component, this is the residual parameter.
+        parameter_err (np.ndarray): Associated error for each parameter value.
+        xy_regions (np.ndarray): Combined (x, y) position coordinates.
+        r_regions (np.ndarray): Radial distance for every position with a parameter value.
 
-        self.xy_to_fit = None
-        self.parameter_to_fit = None
-        self.parameter_err_to_fit = None
+        xy_to_fit (np.ndarray): Concatenated, flattened, NaN removed parameter coordinates for scikit-learn.
+        parameter_to_fit (np.ndarray): Parameter array transformed to something suitable for scikit-learn.
+        parameter_err_to_fit (np.ndarray): Parameter error array transformed to something suitable for scikit-learn.
 
-        self.scale_length = None
-        self.gp = None
+        GPR Properties:
 
-        self.predictions = {}
+        scale_length (float): Measured kernel scale length.
+        gp: The scikit-learn GaussianProcessRegressor.
+        gp_goodness_of_fit (float): R^2 value for the GPR fit. If radial components considered, will include those too.
+
+        predictions (dict): Dictionary containing predictions for a set of coordinates.
 
 
     TODO:
@@ -247,8 +256,8 @@ class AstronomicalGPR:
         self.x_region_pix = None
         self.y_region_pix = None
         self.parameter = None
-        self.parameter_radial_subtract = None
         self.parameter_err = None
+        self.parameter_radial_subtract = None
         self.parameter_radial_subtract_err = None
 
         self.xy_regions = None
@@ -366,11 +375,28 @@ class AstronomicalGPR:
 
     def calculate_pixel_parameters(self, parameter_map, parameter_err_map, step_val=1,
                                    parameter_lower_limit=7.9):
-        """TODO: Write docstring
+        """Pull parameter values and physical (x, y) coordinates from an input .fits file.
+
+        Takes an input .fits map, and uses the RA, Dec, PA and inclination to calculate deprojected coordinates for
+        each pixel within the map. Also returns pixel coordinates for each value, but in the frame of `self.data_hdu`.
+
+        Args:
+             parameter_map (astropy.fits.PrimaryHDU): Input parameter map
+             parameter_err_map (astropy.fits.PrimaryHDU): Input error map for the parameter
+             step_val (int, optional): If there are many pixels, can use this to only select every `step_val`-th pixel.
+                Defaults to 1.
+            parameter_lower_limit (float, optional): If you have reason to distrust values below a certain limit, can
+                input this here. Defaults to 7.9, which is what is recommended in the PHANGS-MUSE HII region catalogues.
 
         """
 
-        x_cen, y_cen = self.wcs.all_world2pix(self.ra, self.dec, 1)
+        wcs = WCS(parameter_map)
+        pix_size = get_pix_size(parameter_map)
+
+        parameter_map = parameter_map.data
+        parameter_err_map = parameter_err_map.data
+
+        x_cen, y_cen = wcs.all_world2pix(self.ra, self.dec, 1)
 
         # Pull out pixel coordinates
 
@@ -378,18 +404,23 @@ class AstronomicalGPR:
             warnings.simplefilter('ignore')
             coordinates = np.where((~np.isnan(parameter_map)) & (parameter_map > parameter_lower_limit))
 
-        self.x_region_pix = coordinates[1][::step_val]
-        self.y_region_pix = coordinates[0][::step_val]
+        x_region_pix = coordinates[1][::step_val]
+        y_region_pix = coordinates[0][::step_val]
         self.parameter = parameter_map[coordinates][::step_val]
         self.parameter_err = parameter_err_map[coordinates][::step_val]
 
         # Calculate projected x/y coordinates
 
-        x_region = self.x_region_pix - x_cen
-        y_region = self.y_region_pix - y_cen
+        x_region = x_region_pix - x_cen
+        y_region = y_region_pix - y_cen
 
-        x_region *= self.pix_size / 3600 * np.pi / 180 * self.dist * 1e3
-        y_region *= self.pix_size / 3600 * np.pi / 180 * self.dist * 1e3
+        x_region *= pix_size / 3600 * np.pi / 180 * self.dist * 1e3
+        y_region *= pix_size / 3600 * np.pi / 180 * self.dist * 1e3
+
+        # Put x_region_pix and y_region_pix into the frame of the original input HDU.
+
+        ra, dec = wcs.all_pix2world(x_region_pix, y_region_pix, 1)
+        self.x_region_pix, self.y_region_pix = self.wcs.all_world2pix(ra, dec, 1)
 
         x_region_phys, y_region_phys = project(x_region, y_region, self.pa, self.inc)
 
@@ -402,31 +433,11 @@ class AstronomicalGPR:
         self.r_regions = np.sqrt(x_region_phys ** 2 + y_region_phys ** 2)
 
     def shuffle_parameter(self):
-        """TODO: Write this up
+        """Randomly shuffle the parameter values (and associated errors) around. Useful for testing the null hypothesis.
 
         """
 
         self.parameter, self.parameter_err = shuffle(self.parameter, self.parameter_err)
-
-    def remove_fraction_of_regions(self, fraction):
-        """Remove a certain fraction of regions, for jackknife testing scale lengths.
-
-        Args:
-            fraction (float): Fraction of regions to retain
-
-        """
-
-        total_size = len(self.region_numbers)
-
-        idx = np.random.choice(total_size, size=int(fraction * total_size), replace=False)
-
-        self.region_numbers = self.region_numbers[idx]
-        self.x_region_pix = self.x_region_pix[idx]
-        self.y_region_pix = self.y_region_pix[idx]
-        self.parameter = self.parameter[idx]
-        self.parameter_err = self.parameter_err[idx]
-        self.xy_regions = self.xy_regions[idx]
-        self.r_regions = self.r_regions[idx]
 
     def simulate_data(self, length_scale=0.05, scaling_factor=0.01, intrinsic_scatter=0.0005,
                       random_scatter=None, include_radial=True, r_0=8.5, m=-0.2):
@@ -507,9 +518,11 @@ class AstronomicalGPR:
         pos = p0 + 1e-2 * p0 * np.random.randn(n_walkers, n_dim)
 
         if not os.path.exists(mcmc_file_name) or overwrite_mcmc:
-            sampler = emcee.EnsembleSampler(n_walkers, n_dim, ln_prob,
-                                            args=(self.r_regions, self.parameter, self.parameter_err))
-            sampler.run_mcmc(pos, n_steps, progress=verbose)
+            with Pool(N_THREADS) as pool:
+                sampler = emcee.EnsembleSampler(n_walkers, n_dim, ln_prob,
+                                                args=(self.r_regions, self.parameter, self.parameter_err),
+                                                pool=pool)
+                sampler.run_mcmc(pos, n_steps, progress=verbose)
 
             # Save out the sampler
 
@@ -587,8 +600,8 @@ class AstronomicalGPR:
 
         plt.close()
 
-    def plot_radial_fit(self, fit_plot_name, x_label=r'$R/r_{25}$', y_label='12 + log(O/H)',
-                        n_points=1000, n_draws=100):
+    def plot_radial_fit(self, fit_plot_name, x_label=r'$R/r_{25}$', y_label='12 + log$_{10}$(O/H)',
+                        n_points=1000, n_draws=100, figsize=(10, 4)):
         """Plot the radial fit to the data.
 
         Takes the MCMC sampler and plots the fit to the data, along with errors in the fit and data itself.
@@ -596,10 +609,11 @@ class AstronomicalGPR:
         Args:
             fit_plot_name (str): File to save the fit to. Should not include file extension.
             x_label (str, optional): x label for the plot. Defaults to r'$R/r_{25}$'.
-            y_label (str, optional): y label for the plot. Defaults to '12 + log(O/H)' (can you tell this was built
+            y_label (str, optional): y label for the plot. Defaults to '12 + log_10(O/H)' (can you tell this was built
                 for metallicities?).
             n_points (int, optional): Number of points in the MCMC line. Defaults to 1000, which is pretty quick.
             n_draws (int, optional): Number of draws to calculate the error in the MCMC line. Defaults to 1000.
+            figsize (tuple, optional): Figure size. Defaults to (10, 4), which is suitable for a two-column figure.
 
         """
 
@@ -611,27 +625,47 @@ class AstronomicalGPR:
         x_plot_mcmc = np.linspace(x_min, x_max, n_points)
 
         line_mcmc = np.zeros([n_points, n_draws])
+        line_uncertainty_mcmc = np.zeros_like(line_mcmc)
 
         for draw in range(n_draws):
             sample = np.random.randint(low=0, high=flat_samples.shape[0])
 
             line_mcmc[:, draw] = flat_samples[sample, 0] * x_plot_mcmc + flat_samples[sample, 1] + \
                                  np.random.normal(scale=flat_samples[sample, 2])
+            line_uncertainty_mcmc[:, draw] = flat_samples[sample, 0] * x_plot_mcmc + flat_samples[sample, 1]
 
         line_percentiles = np.nanpercentile(line_mcmc, [50, 16, 84], axis=1)
+        line_uncertainty_percentiles = np.nanpercentile(line_uncertainty_mcmc, [50, 16, 84], axis=1)
 
-        plt.figure(figsize=(8, 6))
+        plt.figure(figsize=figsize)
+        ax = plt.subplot(111)
 
-        plt.errorbar(self.r_regions, self.parameter, yerr=self.parameter_err, c='k', marker='o', ls='none')
-        plt.plot(x_plot_mcmc, line_percentiles[0, :], c='powderblue', zorder=99)
+        plt.errorbar(self.r_regions, self.parameter, yerr=self.parameter_err, c='k', marker='x', ls='none',
+                     markersize=3)
+        plt.plot(x_plot_mcmc, line_percentiles[0, :], c='powderblue', zorder=98)
         plt.fill_between(x_plot_mcmc, line_percentiles[1, :], line_percentiles[2, :],
-                         color='powderblue', alpha=0.75, zorder=99)
+                         color='powderblue', alpha=0.75, zorder=98)
+        plt.fill_between(x_plot_mcmc, line_uncertainty_percentiles[1, :], line_uncertainty_percentiles[2, :],
+                         color='r', alpha=0.75, zorder=99)
 
         plt.xlim([x_min, x_max])
         plt.ylim([y_min, y_max])
 
+        ax.xaxis.set_minor_locator(matplotlib.ticker.MultipleLocator(0.025))
+        ax.yaxis.set_minor_locator(matplotlib.ticker.MultipleLocator(0.01))
+
+        plt.grid()
+
         plt.xlabel(x_label)
         plt.ylabel(y_label)
+
+        plt.text(0.05, 0.95, r'$12+\log_{10}(\mathrm{O/H}) = %.3f(\pm%.3f)R/r_{25} + %.3f(\pm%.3f)$, '
+                             '\n'
+                             r'$\sigma_\mathrm{int}=%.2f$' %
+                 (self.m, self.m_err, self.r_0, self.r_0_err, self.intrinsic_scatter),
+                 ha='left', va='top',
+                 transform=ax.transAxes,
+                 bbox=dict(facecolor='white', edgecolor='none', alpha=0.75))
 
         plt.tight_layout()
 
@@ -647,127 +681,46 @@ class AstronomicalGPR:
 
         self.parameter_radial_subtract = self.parameter - (self.m * self.r_regions + self.r_0)
 
-    # def fit_radial_distribution_gpr(self, gpr_file,
-    #                                 matern_length_scale=0.1, matern_length_scale_bounds=(0.001, 10), matern_nu=1.5,
-    #                                 n_restarts_optimizer=25, overwrite_regressor=False, verbose=False):
-    #     """TODO: Docstring"""
-    #
-    #     if not os.path.exists(gpr_file) or overwrite_regressor:
-    #
-    #         int_scatter = np.nanstd(self.parameter)
-    #
-    #         kernel_matern = Matern(length_scale=matern_length_scale,
-    #                                length_scale_bounds=matern_length_scale_bounds,
-    #                                nu=matern_nu,
-    #                                )
-    #         kernel_constant_mean = ConstantKernel(0.0)
-    #         kernel_noise = WhiteKernel(noise_level=int_scatter,
-    #                                    noise_level_bounds=(0.01 * int_scatter, int_scatter),
-    #                                    )
-    #         kernel = kernel_matern + kernel_constant_mean + kernel_noise
-    #
-    #         # Put all of this into the regressor.
-    #         gp = GaussianProcessRegressor(kernel=kernel, alpha=self.parameter_err,
-    #                                       n_restarts_optimizer=n_restarts_optimizer)
-    #
-    #         if verbose:
-    #             print('Initial kernel: %s' % gp.kernel)
-    #
-    #         gp_time = time.time()
-    #
-    #         # Fit the GPR. Save out regressor once done
-    #
-    #         with warnings.catch_warnings():
-    #             warnings.simplefilter('ignore')
-    #             gp.fit(self.r_regions.reshape(-1, 1), self.parameter.reshape(-1, 1))
-    #
-    #         if gpr_file:
-    #             dump(gp, gpr_file)
-    #
-    #         if verbose:
-    #             print('GPR fitted: took %.2fm' % ((time.time() - gp_time) / 60))
-    #
-    #     else:
-    #         gp = load(gpr_file)
-    #
-    #     if verbose:
-    #         print('Optimised kernel: %s ' % gp.kernel_)
-    #
-    #     # Pull R^2 statistic from the fit
-    #
-    #     self.radial_goodness_of_fit = gp.score(self.r_regions.reshape(-1, 1), self.parameter.reshape(-1, 1))
-    #
-    # def plot_radial_fit_gpr(self, gpr_file, fit_plot_name,
-    #                         x_label=r'$R/r_{25}$', y_label='12 + log(O/H)'):
-    #     """TODO: Docstring"""
-    #
-    #     gp = load(gpr_file)
-    #
-    #     x_min, x_max = 0, 1.05 * np.nanmax(self.r_regions)
-    #     y_min, y_max = np.nanpercentile(self.parameter, 0.1), np.nanpercentile(self.parameter, 99.9)
-    #
-    #     x_fit = np.linspace(x_min, x_max, 500)
-    #     y_pred = gp.predict(x_fit.reshape(-1, 1), return_std=True)
-    #
-    #     y_fit = y_pred[0].flatten()
-    #     y_err = y_pred[1].flatten()
-    #
-    #     plt.figure(figsize=(8, 6))
-    #     plt.errorbar(self.r_regions, self.parameter, yerr=self.parameter_err,
-    #                  c='k', ls='none', marker='o')
-    #     plt.plot(x_fit, y_fit, c='powderblue')
-    #     plt.fill_between(x_fit, y_fit - y_err, y_fit + y_err,
-    #                      color='powderblue', alpha=0.75, zorder=99)
-    #
-    #     plt.xlabel(x_label)
-    #     plt.ylabel(y_label)
-    #
-    #     plt.xlim(x_min, x_max)
-    #     plt.ylim(y_min, y_max)
-    #
-    #     plt.tight_layout()
-    #
-    #     plt.savefig(fit_plot_name + '.png', bbox_inches='tight')
-    #     plt.savefig(fit_plot_name + '.pdf', bbox_inches='tight')
-    #
-    #     plt.close()
-    #
-    # def subtract_radial_fit_gpr(self, gpr_file, n_batch=None):
-    #
-    #     gp = load(gpr_file)
-    #
-    #     if n_batch is not None:
-    #
-    #         n_batches = np.ceil(len(self.r_regions) / n_batch)
-    #         start_batch = 0
-    #
-    #         # Batch predictions to avoid out of memory issues
-    #
-    #         y_pred = [np.zeros(len(self.r_regions)), np.zeros(len(self.r_regions))]
-    #
-    #         for batch in tqdm(range(int(n_batches)), desc='Batch Predictions'):
-    #
-    #             if batch == n_batches - 1:
-    #                 r_batch = self.r_regions[start_batch:]
-    #             else:
-    #                 r_batch = self.r_regions[start_batch:start_batch + n_batch]
-    #
-    #             gp_pred = gp.predict(r_batch.reshape(-1, 1), return_std=True)
-    #
-    #             for i in range(len(gp_pred[0])):
-    #                 y_pred[0][i + start_batch] = gp_pred[0][i]
-    #                 y_pred[1][i + start_batch] = gp_pred[1][i]
-    #
-    #             start_batch += n_batch
-    #
-    #     else:
-    #
-    #         y_pred = gp.predict(self.r_regions.reshape(-1, 1), return_std=True)
-    #     y_values = y_pred[0].flatten()
-    #     y_err = y_pred[1].flatten()
-    #
-    #     self.parameter_radial_subtract = self.parameter - y_values
-    #     self.parameter_radial_subtract_err = np.sqrt(self.parameter_err ** 2 + y_err ** 2)
+    def remove_fraction_of_regions(self, fraction):
+        """Remove a certain fraction of regions, for jackknife testing scale lengths.
+
+        Args:
+            fraction (float): Fraction of regions to retain
+
+        """
+
+        total_size = len(self.region_numbers)
+
+        idx = np.random.choice(total_size, size=int(fraction * total_size), replace=False)
+
+        self.region_numbers = self.region_numbers[idx]
+        self.x_region_pix = self.x_region_pix[idx]
+        self.y_region_pix = self.y_region_pix[idx]
+        self.parameter = self.parameter[idx]
+        self.parameter_radial_subtract = self.parameter_radial_subtract[idx]
+        self.parameter_err = self.parameter_err[idx]
+        self.xy_regions = self.xy_regions[idx]
+        self.r_regions = self.r_regions[idx]
+
+    def remove_fraction_of_pixels(self, fraction):
+        """Remove a certain fraction of pixels, for jackknife testing scale lengths.
+
+        Args:
+            fraction (float): Fraction of pixels to retain
+
+        """
+
+        total_size = len(self.parameter)
+
+        idx = np.random.choice(total_size, size=int(fraction * total_size), replace=False)
+
+        self.x_region_pix = self.x_region_pix[idx]
+        self.y_region_pix = self.y_region_pix[idx]
+        self.parameter = self.parameter[idx]
+        self.parameter_radial_subtract = self.parameter_radial_subtract[idx]
+        self.parameter_err = self.parameter_err[idx]
+        self.xy_regions = self.xy_regions[idx]
+        self.r_regions = self.r_regions[idx]
 
     def calc_xy_to_fit_regions(self, region_hdu, step_val=1, use_radial=True):
         """Include region information for the fitting.
@@ -781,7 +734,7 @@ class AstronomicalGPR:
             step_val (int, optional): For large data sets, we may need to prune down the total number of pixels. This
                 will step through uniformly and take a representative subset of the data (i.e. step_val=2 removes half
                 the data). Defaults to 1, which keeps everything.
-            use_radial (bool, optional): TODO
+            use_radial (bool, optional): Whether to use a radially subtracted parameter. Defaults to True.
 
         """
 
@@ -830,8 +783,10 @@ class AstronomicalGPR:
     def calc_xy_to_fit_positions(self, use_radial=True):
         """Prepare xy positions and parameter values if we're not using region information.
 
-        Just takes the central values for the parameter and physical positions, and will use those to fit the GPR. This
-        is much quicker than using regions, but I find doesn't work very well!
+        This should be used on a pixel-by-pixel parameter map, rather than drawing from some extended object catalogue.
+
+        Args:
+            use_radial (bool, optional): Whether to use a radially subtracted parameter. Defaults to True.
 
         """
 
@@ -845,21 +800,6 @@ class AstronomicalGPR:
 
         self.parameter_to_fit = parameter.flatten()
         self.parameter_err_to_fit = self.parameter_err.flatten()
-
-    # def jackknife_pixels_to_fit(self, fraction):
-    #     """TODO: Write docstring
-    #
-    #     """
-    #
-    #     total_size = len(self.parameter_to_fit)
-    #
-    #     idx = np.random.choice(total_size, size=int(fraction * total_size), replace=False)
-    #
-    #     self.xy_to_fit = self.xy_to_fit[idx]
-    #     self.r_to_fit = self.r_to_fit[idx]
-    #
-    #     self.parameter_to_fit = self.parameter_to_fit[idx]
-    #     self.parameter_err_to_fit = self.parameter_err_to_fit[idx]
 
     def perturb_pixels_to_fit(self):
         """Perturb the parameters by their errors.
@@ -880,7 +820,7 @@ class AstronomicalGPR:
         self.parameter_to_fit += np.random.normal(loc=0, scale=self.parameter_err_to_fit)
 
     def fit_gpr_regressor(self, gpr_file=None,
-                          matern_length_scale=0.1, matern_length_scale_bounds=(0.001, 2), matern_nu=1.5,
+                          matern_length_scale=0.1, matern_length_scale_bounds=(0.001, 5), matern_nu=1.5,
                           n_restarts_optimizer=25, kernel=None,
                           overwrite_regressor=False, verbose=False):
         """Fit the Gaussian processor regressor.
@@ -964,6 +904,19 @@ class AstronomicalGPR:
 
         self.scale_length = scale_length
         self.gp = gp
+
+        # TODO: Just a quick test looking at the BIC
+
+        # theta = (self.m, self.r_0, self.intrinsic_scatter)
+        # sl_n_par = 3
+        # sl_likelihood = ln_like(theta, self.r_to_fit, self.parameter, self.parameter_err_to_fit)
+        # print(sl_likelihood)
+        # sl_bic = sl_n_par * np.log(len(self.r_to_fit)) - 2 * sl_likelihood
+        # print(sl_bic)
+        #
+        # gpr_bic = gp.log_marginal_likelihood()
+        # print(gpr_bic)
+        # no
 
         # Calculate the goodness of fit
 
@@ -1093,18 +1046,6 @@ class AstronomicalGPR:
             slope_error[slope_error == 0] = np.nan
             slope_error[self.nan_mask] = self.m_err * self.r_full[self.nan_mask] + self.r_0_err
             pred_map_err = np.sqrt(pred_map_err ** 2 + slope_error ** 2)
-            # else:
-            #     if 'radial_gpr' not in self.predictions.keys():
-            #         raise Warning('Expecting radial_gpr predictions to add in slope')
-            #     radial_contribution = np.zeros_like(pred_map)
-            #     radial_contribution[radial_contribution == 0] = np.nan
-            #     radial_err = radial_contribution.copy()
-            #
-            #     radial_contribution[self.nan_mask] = self.predictions['radial_gpr'][0]
-            #     pred_map = pred_map_radial_subtract + radial_contribution
-            #
-            #     radial_err[self.nan_mask] = self.predictions['radial_gpr'][1]
-            #     pred_map_err = np.sqrt(pred_map_err ** 2 + radial_err ** 2)
 
         else:
             pred_map[self.nan_mask] = pred[0]
