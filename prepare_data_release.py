@@ -101,7 +101,7 @@ readme.write("This directory contains Gaussian Process Regression (GPR) smoothed
              (gpr_version, metallicity_calib, muse_version, phangs_version))
 
 readme.write('\nCHANGES\n')
-readme.write("v1.0: Accepted paper version (2021/11/04)")
+readme.write("v1.0: Accepted paper version (2021/11/04)\n")
 readme.write("v0.5: Moved to O'Donnell '94 extinction curve. Moved to restricting pixels within HII regions from the "
              "nebulae catalogues. (2021/07/22)\n")
 readme.write('v0.4: Fixed double Galactic extinction correction. (2021/06/17)\n')
