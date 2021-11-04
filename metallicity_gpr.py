@@ -677,7 +677,7 @@ for metallicity_calib in metallicity_calibs:
 
             ax2.add_artist(scalebar)
 
-            cbarax = fig.add_axes([0.125, 0.075, 0.75, 0.025])
+            cbarax = fig.add_axes([0.125, 0, 0.75, 0.025])
             cbar = plt.colorbar(scatter, cax=cbarax, orientation='horizontal')
 
             cbar.set_label(r'$\frac{\log_{10}(\mathrm{O/H})_{\rm obs} - \log_{10}(\mathrm{O/H})_{\rm pred}}'

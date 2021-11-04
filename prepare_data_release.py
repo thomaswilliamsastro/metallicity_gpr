@@ -23,9 +23,6 @@ if not os.path.exists(os.path.join(output_dir, 'diagnostics')):
 
 for galaxy in galaxies:
 
-    if not os.path.exists(os.path.join(output_dir, 'diagnostics', galaxy)):
-        os.makedirs(os.path.join(output_dir, 'diagnostics', galaxy))
-
     # TODO: Swap out switches
 
     hdu_in_name = os.path.join(muse_version, '%s_ext_curve' % extinction_curve, metallicity_calib,
@@ -59,19 +56,19 @@ for galaxy in galaxies:
     if hii_only:
         plot_in_name += '_hii_only'
     plot_in_name = os.path.join(plot_in_name, galaxy + '_positions_gpr.png')
-    plot_out_name = os.path.join(output_dir, 'diagnostics', galaxy, galaxy + '_fit_overview.png')
+    plot_out_name = os.path.join(output_dir, 'diagnostics', galaxy + '_fit_overview.png')
     os.system('cp ' + plot_in_name + ' ' + plot_out_name)
 
-    plot_in_name = plot_in_name.replace('_positions_gpr.png', '_positions_radial_comparison.png')
-    plot_out_name = os.path.join(output_dir, 'diagnostics', galaxy, galaxy + '_scatter_radial.png')
-    os.system('cp ' + plot_in_name + ' ' + plot_out_name)
+    # plot_in_name = plot_in_name.replace('_positions_gpr.png', '_positions_radial_comparison.png')
+    # plot_out_name = os.path.join(output_dir, 'diagnostics', galaxy, galaxy + '_scatter_radial.png')
+    # os.system('cp ' + plot_in_name + ' ' + plot_out_name)
 
-    plot_in_name = plot_in_name.replace('_positions_radial_comparison.png', '_positions_residual_positions_sigma.png')
-    plot_out_name = os.path.join(output_dir, 'diagnostics', galaxy, galaxy + '_residual_positions.png')
+    plot_in_name = plot_in_name.replace('_positions_gpr.png', '_positions_residual_positions_sigma.png')
+    plot_out_name = os.path.join(output_dir, 'diagnostics', galaxy + '_residual_positions.png')
     os.system('cp ' + plot_in_name + ' ' + plot_out_name)
 
 plot_in_name = os.path.join('..', plot_dir, muse_version, '%s_ext_curve' % extinction_curve, metallicity_calib,
-                            'model_comparisons_%s_pix_maps' % metallicity_calib)
+                            'model_comparisons_%s_bic_pix_maps' % metallicity_calib)
 if hii_only:
     plot_in_name += '_hii_only'
 plot_in_name += '.png'
@@ -96,15 +93,15 @@ readme = open(os.path.join(output_dir, 'readme.txt'), 'w+')
 
 readme.write("This directory contains Gaussian Process Regression (GPR) smoothed metallicity maps (and associated\n"
              "errors), %s. These maps use the %s metallicity calibration. The maps themselves are named as\n"
-             "'GALAXY_metallicity.fits', and the errors as 'GALAXY_metallicity_err.fits'. The units are 12+log(O/H).\n"
-             "These maps have been generated using MUSE %s, and sample table %s. There are also some diagnostic plots\n"
-             "for each galaxy that show the change in scatter radially with either a radial gradient, or the GPR\n"
-             "fitting, a map of the residuals, and an overall overview of the map and error. There is also a summary\n"
-             "plot for all galaxies that shows the model improvement (if any) of including the azimuthal term. If\n "
-             "there are any questions, please feel free to email me at williams@mpia.de.\n" %
+             "'GALAXY_metallicity.fits', and the errors as 'GALAXY_metallicity_err.fits'. The units are 12+log(O/H). \n"
+             "These maps have been generated using MUSE %s, and sample table %s. There are also some diagnostic "
+             "plots for each galaxy that show sigma-based residuals, and an overall overview of the map and error. "
+             "There is also a summary plot for all galaxies that shows the model improvement (if any) of including the "
+             "GPR. If there are any questions, please feel free to email me at williams@mpia.de.\n" %
              (gpr_version, metallicity_calib, muse_version, phangs_version))
 
 readme.write('\nCHANGES\n')
+readme.write("v1.0: Accepted paper version (2021/11/04)")
 readme.write("v0.5: Moved to O'Donnell '94 extinction curve. Moved to restricting pixels within HII regions from the "
              "nebulae catalogues. (2021/07/22)\n")
 readme.write('v0.4: Fixed double Galactic extinction correction. (2021/06/17)\n')

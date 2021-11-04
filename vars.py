@@ -25,7 +25,7 @@ hii_mask_dir = os.path.join('nebulae_catalogue/', nebulae_ver)
 muse_version = 'DR2.1'
 phangs_version = 'v1p6'
 use_conv = True
-gpr_version = 'v0p5'
+gpr_version = 'v1p0'
 
 phangs_table_name = os.path.join(top_dir, 'documents', 'phangs_sample_table_' + phangs_version + '.fits')
 phangs_master_table = Table.read(phangs_table_name)
